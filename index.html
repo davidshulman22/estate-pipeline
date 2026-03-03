@@ -5,6 +5,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Estate Planning Pipeline</title>
+  <link rel="icon" href="data:,">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script src="config.js"></script>
   <style>
@@ -256,6 +257,23 @@
     }
     .quick-add .modal-actions { margin-top: 14px; }
 
+    /* --- Status banner --- */
+    #status-bar {
+      position: fixed;
+      bottom: 16px;
+      right: 16px;
+      padding: 8px 16px;
+      border-radius: 6px;
+      font-size: 13px;
+      z-index: 300;
+      opacity: 0;
+      transition: opacity 0.3s;
+      pointer-events: none;
+    }
+    #status-bar.visible { opacity: 1; }
+    #status-bar.success { background: #065f46; color: #fff; }
+    #status-bar.error { background: var(--danger); color: #fff; }
+
     /* --- Responsive --- */
     @media (max-width: 768px) {
       .board { padding: 10px; gap: 10px; }
@@ -330,18 +348,31 @@
   </div>
 </div>
 
+<div id="status-bar"></div>
+
 <script>
+// --- Status banner ---
+let statusTimer = null;
+function showStatus(msg, type = 'success') {
+  const bar = document.getElementById('status-bar');
+  bar.textContent = msg;
+  bar.className = type + ' visible';
+  clearTimeout(statusTimer);
+  statusTimer = setTimeout(() => { bar.classList.remove('visible'); }, 2000);
+}
+
 // --- Constants ---
 const STAGES = [
-  { key: 'new_lead', label: 'New Lead / First Contact' },
+  { key: 'new_lead', label: 'New Lead — Schedule Consult' },
   { key: 'consultation_scheduled', label: 'Consultation Scheduled' },
-  { key: 'consultation_complete', label: 'Consultation Complete — Awaiting Engagement' },
+  { key: 'post_consultation_my_action', label: 'Post-Consult — My Action' },
+  { key: 'post_consultation_awaiting_client', label: 'Post-Consult — Awaiting Client' },
   { key: 'engagement_sent', label: 'Engagement Sent — Awaiting Retainer' },
-  { key: 'retainer_received', label: 'Retainer Received — Drafting in Progress' },
+  { key: 'drafting_in_progress', label: 'Drafting in Progress' },
   { key: 'drafts_sent', label: 'Drafts Sent — Awaiting Client Feedback' },
   { key: 'revisions_in_progress', label: 'Revisions in Progress' },
   { key: 'signing_scheduled', label: 'Signing Scheduled' },
-  { key: 'signing_complete', label: 'Signing Complete — Post-Signing Tasks' },
+  { key: 'post_signing_tasks', label: 'Post-Signing Tasks' },
   { key: 'matter_closed', label: 'Matter Closed' },
 ];
 
@@ -427,7 +458,7 @@ async function loadMatters() {
     .eq('user_id', currentUser.id)
     .eq('archived', false)
     .order('created_at', { ascending: true });
-  if (error) { console.error('Load error:', error); return; }
+  if (error) { console.error('Load error:', error); showStatus('Load failed: ' + error.message, 'error'); return; }
   matters = data || [];
   renderBoard();
 }
@@ -448,7 +479,8 @@ async function addMatter() {
     user_id: currentUser.id,
     checklist: defaultChecklist
   });
-  if (error) { console.error('Insert error:', error); return; }
+  if (error) { console.error('Insert error:', error); showStatus('Add failed: ' + error.message, 'error'); return; }
+  showStatus('Matter added');
   closeQuickAdd();
   document.getElementById('new-client-name').value = '';
   await loadMatters();
@@ -459,8 +491,10 @@ async function updateMatter(id, updates) {
     .from('matters')
     .update(updates)
     .eq('id', id);
-  if (error) { console.error('Update error:', error); return; }
+  if (error) { console.error('Update error:', error); showStatus('Save failed: ' + error.message, 'error'); return false; }
+  showStatus('Saved');
   await loadMatters();
+  return true;
 }
 
 async function archiveMatter() {
@@ -511,7 +545,8 @@ function renderBoard() {
       const newStage = body.dataset.stage;
       const matter = matters.find(m => m.id === matterId);
       if (matter && matter.stage !== newStage) {
-        // Reset checklist for new stage
+        const newLabel = STAGES.find(s => s.key === newStage)?.label || newStage;
+        if (!confirm('Move "' + matter.client_name + '" to ' + newLabel + '?\n\nThis will reset the checklist for the new stage.')) return;
         const defaultChecklist = (stageChecklists[newStage] || []).map(item => ({
           text: item,
           done: false
@@ -606,7 +641,7 @@ function renderChecklist(checklist) {
   container.appendChild(ul);
 }
 
-function toggleChecklistItem(idx, checked) {
+async function toggleChecklistItem(idx, checked) {
   const matter = matters.find(m => m.id === currentMatterId);
   if (!matter) return;
   const checklist = [...(matter.checklist || [])];
@@ -614,6 +649,13 @@ function toggleChecklistItem(idx, checked) {
     checklist[idx] = { ...checklist[idx], done: checked };
     matter.checklist = checklist;
     renderChecklist(checklist);
+    // Auto-save to database
+    const { error } = await db
+      .from('matters')
+      .update({ checklist })
+      .eq('id', currentMatterId);
+    if (error) { showStatus('Checklist save failed', 'error'); }
+    else { showStatus('Saved'); }
   }
 }
 
@@ -630,8 +672,13 @@ async function saveDetail() {
     checklist: matter ? matter.checklist : []
   };
 
-  // If stage changed, reset checklist to new stage defaults
+  // If stage changed, confirm and reset checklist to new stage defaults
   if (newStage !== oldStage) {
+    const newLabel = STAGES.find(s => s.key === newStage)?.label || newStage;
+    if (!confirm('Change stage to ' + newLabel + '?\n\nThis will reset the checklist for the new stage.')) {
+      document.getElementById('detail-stage').value = oldStage;
+      return;
+    }
     updates.checklist = (stageChecklists[newStage] || []).map(item => ({
       text: item,
       done: false
